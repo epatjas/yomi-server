@@ -1,75 +1,85 @@
-const express = require('express');
-const http = require('http');
-const WebSocket = require('ws');
-const { OpenAI } = require('openai');
-const fs = require('fs');
-require('dotenv').config();
+// minimal-server.js
+import dotenv from 'dotenv';
+dotenv.config();
 
-// Create an Express app
-const app = express();
-const port = process.env.PORT || 8000;
+import { WebSocketServer } from 'ws';
+import WebSocket from 'ws';
 
-// Create HTTP server
-const server = http.createServer(app);
+const wss = new WebSocketServer({ port: 8001 });
 
-// Create WebSocket server
-const wss = new WebSocket.Server({ server });
+// Function to create OpenAI realtime connection
+const createOpenAIConnection = () => {
+  console.log('\n=== Attempting OpenAI Realtime Connection ===');
+  console.log('Connecting to:', "wss://api.openai.com/v1/realtime");
+  
+  const url = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01";
+  const ws = new WebSocket(url, {
+    headers: {
+      "Authorization": "Bearer " + process.env.OPENAI_API_KEY,
+      "OpenAI-Beta": "realtime=v1",
+    },
+  });
 
-// OpenAI client
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  ws.on('open', () => {
+    console.log('=== OpenAI Realtime Connection Successful ===');
+    console.log('Model: gpt-4o-realtime-preview-2024-10-01');
+  });
 
-// WebSocket connection handling
+  ws.on('error', (error) => {
+    console.error('=== OpenAI Realtime Connection Error ===');
+    console.error('Error details:', error);
+  });
+
+  return ws;
+};
+
 wss.on('connection', (clientWs) => {
-    console.log('Client connected');
+  console.log('\n=== New Client Connection ===');
+  let openaiWs = null;
 
-    let audioChunks = [];
+  clientWs.on('message', async (message) => {
+    try {
+      console.log('\n=== Received Client Message ===');
+      console.log('Message:', message.toString());
+      
+      const data = JSON.parse(message.toString());
+      
+      if (data.type === 'session.create') {
+        console.log('\n=== Initializing OpenAI Realtime Session ===');
+        openaiWs = createOpenAIConnection();
 
-    clientWs.on('message', async (message) => {
-        try {
-            let data = JSON.parse(message);
-
-            if (data.type === 'audio') {
-                audioChunks.push(Buffer.from(data.audio, 'base64'));
-            } else if (data.type === 'end') {
-                const audioBuffer = Buffer.concat(audioChunks);
-                
-                // Save the audio buffer to a temporary file
-                const tempFilePath = './temp_audio.wav';
-                fs.writeFileSync(tempFilePath, audioBuffer);
-
-                const transcription = await openai.audio.transcriptions.create({
-                    file: fs.createReadStream(tempFilePath),
-                    model: "whisper-1",
-                    language: "en",
-                });
-
-                clientWs.send(JSON.stringify({ type: 'transcript', text: transcription.text }));
-
-                // Clean up the temporary file
-                fs.unlinkSync(tempFilePath);
-
-                audioChunks = []; // Reset for next audio stream
+        openaiWs.on('open', () => {
+          console.log('\n=== Sending Initial OpenAI Configuration ===');
+          const initMessage = {
+            type: "response.create",
+            response: {
+              modalities: ["text"],
+              instructions: "Please assist the user.",
             }
-        } catch (error) {
-            console.error('Error processing message:', error);
-            clientWs.send(JSON.stringify({ type: 'error', message: 'Error processing message: ' + error.message }));
-        }
-    });
+          };
+          console.log('Init message:', JSON.stringify(initMessage, null, 2));
+          openaiWs.send(JSON.stringify(initMessage));
+        });
 
-    clientWs.on('close', () => {
-        console.log('Client disconnected');
-    });
+        openaiWs.on('message', (openaiMessage) => {
+          console.log('\n=== Received OpenAI Message ===');
+          console.log('Message:', openaiMessage.toString());
+          clientWs.send(openaiMessage.toString());
+        });
+      }
+    } catch (error) {
+      console.error('\n=== Error Processing Message ===');
+      console.error('Error:', error);
+    }
+  });
+
+  clientWs.on('close', () => {
+    console.log('\n=== Client Disconnected ===');
+    if (openaiWs) {
+      openaiWs.close();
+    }
+  });
 });
 
-// Basic HTTP endpoint for testing
-app.get('/', (req, res) => {
-    res.send('Yomi WebSocket server is running');
-});
-
-// Start the server
-server.listen(port, () => {
-    console.log(`Server is running on http://localhost:${port}`);
-});
-
-// Replace the detailed OpenAI client log with a simple confirmation
-console.log('OpenAI client initialized successfully');
+console.log('\n=== WebSocket Server Started ===');
+console.log('Server running on port 8001');
